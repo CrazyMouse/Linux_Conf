@@ -57,7 +57,7 @@ install_sqlite_if_needed() {
 
   echo "==> 未检测到 sqlite3，准备自动安装"
 
-  if command -v apt >/devnull 2>&1; then
+  if command -v apt >/dev/null 2>&1; then
     apt update
     apt install -y sqlite3
   else
@@ -90,15 +90,21 @@ install_sui_if_needed() {
 }
 
 #############################################
-# 函数：安装 acme.sh + socat + 签证书
-#       续期时只执行：s-ui restart
+# 函数：安装 acme.sh + socat + 签证书 / 安装证书
+# 逻辑：
+#   1. 如果 acme.sh 中已经存在该域名目录 -> 跳过 --issue，只执行 --installcert
+#   2. 否则：先 --issue 再 --installcert
+#   3. 续期/安装完成后执行：s-ui restart
 #############################################
 setup_acme_and_cert() {
   local domain="$1"
   local cert_dir="/root/cert/$domain"
+  local acme_home="/root/.acme.sh"
+  local acme_domain_dir="$acme_home/$domain"
+  local acme_domain_ecc_dir="${acme_domain_dir}_ecc"
 
   echo "==> 检查 acme.sh"
-  if [[ ! -d "/root/.acme.sh" ]]; then
+  if [[ ! -d "$acme_home" ]]; then
     curl https://get.acme.sh | sh
   else
     echo "    已存在 acme.sh"
@@ -119,30 +125,41 @@ setup_acme_and_cert() {
   fi
 
   echo "==> 设置 CA = Let's Encrypt"
-  /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+  "$acme_home/acme.sh" --set-default-ca --server letsencrypt
 
-  echo
-  echo "==> 为域名申请证书：$domain"
-  echo "    请确保："
-  echo "      1) $domain 已解析到本机 IP"
-  echo "      2) 80 端口未被其他服务占用（nginx/caddy/apache 等）"
-  echo
+  # 判断是否已经存在该域名的证书目录
+  local has_existing_cert="false"
+  if [[ -d "$acme_domain_dir" || -d "$acme_domain_ecc_dir" ]]; then
+    has_existing_cert="true"
+    echo "==> 检测到 acme.sh 中已有 $domain 的证书目录，跳过重新签发，只做安装"
+  fi
 
-  /root/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport 80
+  if [[ "$has_existing_cert" == "false" ]]; then
+    echo
+    echo "==> 为域名申请证书：$domain"
+    echo "    请确保："
+    echo "      1) $domain 已解析到本机 IP"
+    echo "      2) 80 端口未被其他服务占用（nginx/caddy/apache 等）"
+    echo
+
+    "$acme_home/acme.sh" --issue -d "$domain" --standalone --httpport 80
+  else
+    echo "==> 跳过 acme.sh --issue 步骤（已有证书）"
+  fi
 
   echo "==> 安装证书到：$cert_dir"
   mkdir -p "$cert_dir"
 
-  /root/.acme.sh/acme.sh --installcert -d "$domain" \
+  "$acme_home/acme.sh" --installcert -d "$domain" \
     --key-file "$cert_dir/privkey.pem" \
     --fullchain-file "$cert_dir/fullchain.pem" \
     --reloadcmd "s-ui restart >/dev/null 2>&1 || true"
 
   echo
-  echo "✔ 证书签发完成："
+  echo "✔ 证书已安装 / 更新："
   echo "  fullchain.pem：$cert_dir/fullchain.pem"
   echo "  privkey.pem  ：$cert_dir/privkey.pem"
-  echo "  续期后将自动执行：s-ui restart"
+  echo "  续期/安装后会自动执行：s-ui restart"
   echo
 }
 
@@ -234,8 +251,9 @@ echo "域名：$NEW_DOMAIN"
 echo "证书路径：/root/cert/$NEW_DOMAIN/fullchain.pem"
 echo "私钥路径：/root/cert/$NEW_DOMAIN/privkey.pem"
 echo
-echo "后续 acme.sh 续期证书时，会自动执行：s-ui restart"
-echo "你只需要在 S-UI 面板里确认："
-echo "  1) 面板域名 / 订阅域名 已经改成 $NEW_DOMAIN"
-echo "  2) HTTPS / TLS 证书路径指向上面这两个文件。"
+echo "说明："
+echo "  - 如果之前 acme.sh 已经签过 $NEW_DOMAIN，但 /root/cert/$NEW_DOMAIN 里没有文件，"
+echo "    脚本会跳过重新签发，直接从 acme.sh 安装证书到该目录。"
+echo "  - 之后 acme.sh 续期时会自动执行：s-ui restart"
+echo "  - 你只需要在 S-UI 面板里确认域名和证书路径即可。"
 
